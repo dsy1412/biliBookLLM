@@ -1,136 +1,152 @@
 # BiliBookLLM
 
-把 B 站视频变成结构化笔记的单机全栈项目：FastAPI 后端负责抓取字幕 / Whisper 转写 / LLM 摘要，Next.js 前端负责提交任务、查看进度与阅读结果，支持导出 Markdown / TXT / JSON。
+**English** · [简体中文](./README.zh.md)
 
-> 仓库：<https://github.com/dsy1412/biliBookLLM.git>
+Turn Bilibili videos into structured notes — a single-machine full-stack project. A FastAPI backend handles subtitle extraction / Whisper transcription / LLM summarization; a Next.js frontend submits jobs, tracks progress, reads results, and exports to Markdown / TXT / JSON.
 
-## 架构一览
+> Repo: <https://github.com/dsy1412/biliBookLLM.git>
+
+## Why I built this (Motivation)
+
+I maintain my personal knowledge base in **Obsidian**. Many Bilibili creators I follow produce long-form content (science, engineering, finance), and re-watching a 20-minute video just to refresh a memory is expensive. I want to **lift the content out of the video and into my vault as searchable, linkable Markdown**, so it can be connected with my other notes via backlinks.
+
+That led to two concrete requirements:
+
+1. **Subtitles first.** The top priority is to reliably obtain a transcript for any Bilibili URL I paste — preferring the creator's own CC, falling back to Whisper ASR when none exists. This is the single most valuable artifact for a knowledge base: it can be read, quoted, and cross-linked.
+2. **LLM summarization as a second pass.** With the transcript in hand, an LLM condenses it into chapters, key takeaways, keywords, and optional Q&A, all exported as a single Markdown file that drops cleanly into `Obsidian/Vault/Inbox/`.
+
+**Roadmap toward a "hosted API" flavor.** The current app runs locally and calls a user-supplied LLM key. I'm planning a later variant that exposes a public REST API (and probably an Obsidian plugin / shortcut) so the whole pipeline can be triggered without a local install — paste a URL, get back a ready-to-import Markdown note. The internal contracts under `apps/api/app/routers/*` are already designed with that future in mind: stateless job IDs, JSON results, dedicated `/export` endpoint.
+
+If you have a similar use case (Obsidian / Logseq / any plain-Markdown vault), this repo should be immediately useful.
+
+## Architecture at a glance
 
 ```text
 ┌──────────────────────┐          ┌───────────────────────────────┐
 │  Next.js 16 (Web)    │  /api/v1 │  FastAPI (API, uvicorn)       │
-│  apps/web  :3000     ├─────────►│  apps/api  :8001 (默认)       │
-│  Route Handler 反代  │          │  yt-dlp / faster-whisper / LLM│
+│  apps/web  :3000     ├─────────►│  apps/api  :8001 (default)    │
+│  Route Handler proxy │          │  yt-dlp / faster-whisper / LLM│
 └──────────────────────┘          └───────────────────────────────┘
                                                │
                                                ▼
                                      SQLite (data/bilibookllm.db)
 ```
 
-前端在浏览器只请求同域 `/api/v1/*`，由 `apps/web/src/app/api/v1/[[...path]]/route.ts` 反代到后端（`BACKEND_URL`），避免 CORS / `Failed to fetch`。
+The browser only talks to the same-origin `/api/v1/*`; `apps/web/src/app/api/v1/[[...path]]/route.ts` proxies to the backend (`BACKEND_URL`). This avoids CORS and `Failed to fetch`.
 
-## 目录结构
+## Repository layout
 
 ```text
 apps/
-  api/                 FastAPI 服务
+  api/                 FastAPI service
     app/
-      main.py          应用入口 + CORS + 异常处理
+      main.py          App entry + CORS + exception handlers
       config.py        Pydantic settings (.env)
-      db/              SQLAlchemy 引擎 & 基类
+      db/              SQLAlchemy engine & base
       models/          Job / Transcript / SummaryResult
-      schemas/         Pydantic 响应模型
+      schemas/         Pydantic response models
       routers/
-        jobs.py        /api/v1/jobs （含 /result）
+        jobs.py        /api/v1/jobs (including /result)
         export.py      /api/v1/export/{job_id}/{format}
       modules/
-        extractor.py   yt-dlp + BV 号校验
+        extractor.py   yt-dlp + BV-ID validation
         transcriber.py faster-whisper
-        summarizer.py  LLM 分块摘要
-        exporter.py    Markdown / TXT / JSON 导出
-      services/pipeline.py   任务流水线
-    scripts/dev_smoke.py     端到端冒烟脚本（含固定 BV 链接）
+        summarizer.py  chunked LLM summarization
+        exporter.py    Markdown / TXT / JSON export
+      services/pipeline.py   Job pipeline
+    scripts/dev_smoke.py     End-to-end smoke script (uses a fixed BV URL)
     pyproject.toml
   web/                 Next.js 16 (Turbopack) + React 19 + Tailwind 4
     src/
       app/
-        page.tsx                首页（提交任务）
-        jobs/[id]/page.tsx      阅读页
-        api/v1/[[...path]]/route.ts   同域反代到 FastAPI
-      lib/api-client.ts         前端封装
-      components/               UI 组件
+        page.tsx                Home (submit a job)
+        jobs/[id]/page.tsx      Reader
+        api/v1/[[...path]]/route.ts   Same-origin proxy to FastAPI
+      lib/api-client.ts         Typed client
+      components/               UI components
     package.json
 ```
 
-## 快速开始
+## Quick start
 
-### 1) 后端（Python ≥ 3.11）
+### 1) Backend (Python ≥ 3.11)
 
 ```bash
 cd apps/api
 python -m venv .venv
 .venv\Scripts\activate        # macOS/Linux: source .venv/bin/activate
 pip install -e .[dev]
-copy .env.example .env         # 填 LLM_API_KEY 等
+copy .env.example .env         # set LLM_API_KEY, etc.
 uvicorn app.main:app --host 127.0.0.1 --port 8001
 ```
 
-重要：默认端口是 **8001**。Windows 上 `uvicorn --reload` 有概率在被硬杀时留下僵尸监听 socket，占住 8000，前端会收到 `Internal Server Error (HTTP 500)` 的纯文本（旧代码）。切到 8001 是最稳妥的规避方式；如果你要换回 8000，先确认端口真正空闲（`netstat -ano | findstr :8000`）。
+Important: the default port is **8001**. On Windows, `uvicorn --reload` can leak zombie listening sockets on 8000 when Ctrl-C'd hard, which then serves stale 500s (plain text `Internal Server Error`). 8001 avoids that. If you need 8000, verify it is truly free first (`netstat -ano | findstr :8000`).
 
-### 2) 前端（Node ≥ 20）
+### 2) Frontend (Node ≥ 20)
 
 ```bash
 cd apps/web
 npm install
-copy .env.example .env         # 默认空即可
+copy .env.example .env         # empty default is fine
 npm run dev                    # http://localhost:3000
 ```
 
-`apps/web/.env`：
+`apps/web/.env`:
 
 ```env
-# 不设置 NEXT_PUBLIC_API_URL → 浏览器只走同域 /api/v1，由 route.ts 反代到 BACKEND_URL
+# Leave NEXT_PUBLIC_API_URL unset → browser only hits same-origin /api/v1,
+# which route.ts proxies to BACKEND_URL below.
 BACKEND_URL=http://127.0.0.1:8001
 # NEXT_PUBLIC_API_URL=http://127.0.0.1:8001/api/v1
 ```
 
-### 3) 一键冒烟测试（推荐）
+### 3) One-command smoke test (recommended)
 
-项目内置了用固定 B 站链接 `https://www.bilibili.com/video/BV1TRdbBeETz/...` 做端到端验证的脚本：
+The repo ships an end-to-end smoke script that uses a fixed Bilibili URL (`BV1TRdbBeETz`):
 
 ```bash
 cd apps/web
 npm run smoke:api
 ```
 
-该脚本会：
+It will:
 
-1. 校验 `BV1TRdbBeETz` 能被 `extractor.validate_and_extract_bvid` 正确解析。
-2. 用 `API_BASE`（默认 `http://127.0.0.1:8001`）调 `/health`，以及 `GET /api/v1/jobs/{id}/result`。
-3. 若未设 `SKIP_NEXT=1`，再经 `NEXT_BASE`（默认 `http://127.0.0.1:3000`）的 Next 反代请求同一接口，断言 200。
+1. Validate that `BV1TRdbBeETz` parses through `extractor.validate_and_extract_bvid`.
+2. Hit `API_BASE` (default `http://127.0.0.1:8001`) for `/health` and, if a completed job exists, `GET /api/v1/jobs/{id}/result`.
+3. Unless `SKIP_NEXT=1` is set, repeat the request through `NEXT_BASE` (default `http://127.0.0.1:3000`) to assert the Next proxy returns the same 200 body.
 
-环境变量可通过 shell 覆盖：
+Override via environment:
 
-```bash
+```powershell
 $env:API_BASE="http://127.0.0.1:8001"
 $env:NEXT_BASE="http://127.0.0.1:3000"
-$env:SKIP_NEXT="1"    # 仅想测直连后端
+$env:SKIP_NEXT="1"    # only test the backend directly
 ```
 
-## 主要接口
+## Main endpoints
 
-| 路径                                | 方法 | 说明                                                                 |
-| ----------------------------------- | ---- | -------------------------------------------------------------------- |
-| `/api/v1/jobs`                      | POST | 提交 B 站 URL，创建新 job（202）                                     |
-| `/api/v1/jobs`                      | GET  | 分页列出 jobs，可按 `status` 过滤                                    |
-| `/api/v1/jobs/{job_id}`             | GET  | 当前状态与进度                                                       |
-| `/api/v1/jobs/{job_id}/result`      | GET  | 已完成任务的完整结果（UTF-8 JSON；`/result` 必须先于 `/{job_id}` 注册） |
-| `/api/v1/jobs/{job_id}`             | DELETE | 删除任务                                                            |
-| `/api/v1/export/{job_id}/{format}`  | GET  | 导出 `markdown` / `txt` / `json`                                     |
-| `/health`                           | GET  | 健康检查                                                             |
+| Path                                 | Method | Description                                                                   |
+| ------------------------------------ | ------ | ----------------------------------------------------------------------------- |
+| `/api/v1/jobs`                       | POST   | Submit a Bilibili URL, create a new job (202)                                 |
+| `/api/v1/jobs`                       | GET    | Paginated list, optional `status` filter                                      |
+| `/api/v1/jobs/{job_id}`              | GET    | Current status and progress                                                   |
+| `/api/v1/jobs/{job_id}/result`       | GET    | Full result of a completed job (UTF-8 JSON; `/result` must register before `/{job_id}`) |
+| `/api/v1/jobs/{job_id}`              | DELETE | Delete a job                                                                  |
+| `/api/v1/export/{job_id}/{format}`   | GET    | Export as `markdown` / `txt` / `json`                                         |
+| `/health`                            | GET    | Health check                                                                  |
 
-## 反代注意事项（`apps/web/.../route.ts`）
+## Proxy implementation notes (`apps/web/.../route.ts`)
 
-- 向后端请求时强制 `Accept-Encoding: identity`，避免 Node 的 undici 自动解压却仍把 `Content-Encoding: gzip`、错误的 `Content-Length` 转发给浏览器。
-- 响应缓冲后再返回，并删除 `content-encoding` / `content-length` / `transfer-encoding`，重写 `content-length`。
-- 整条链路超时 120s，失败返回 502 JSON（含 `detail.error.code / message`），`api-client.ts` 的 `throwIfNotOk` 能据此显示人类可读的错误文案。
+- Force `Accept-Encoding: identity` when calling the backend, to prevent Node's undici from transparently decompressing the body while still forwarding the upstream `Content-Encoding: gzip` / wrong `Content-Length` to the browser.
+- Buffer the response, strip `content-encoding` / `content-length` / `transfer-encoding`, and rewrite `content-length` from the buffered bytes.
+- End-to-end timeout is 120s; failures respond with 502 JSON (`detail.error.code / message`), which `api-client.ts`'s `throwIfNotOk` renders into readable messages.
 
-## 排查常见问题
+## Troubleshooting
 
-- **`Internal Server Error (HTTP 500)`** 且响应体是纯文本：大概率是旧代码进程没被杀，或 schema 对 `llm_model` 之类字段还要求 `str`。确认 `apps/api/app/schemas/job.py` 里 `ProcessingInfo.llm_model: str | None = None`，重启后端即可。
-- **`Failed to fetch`**：浏览器直连了 API。保持 `NEXT_PUBLIC_API_URL` 为空，让浏览器只走同域 `/api/v1`。
-- **`GET /{job_id}/result` 返回 404/405/空**：确保 FastAPI 中 `@router.get("/{job_id}/result")` 定义在 `@router.get("/{job_id}")` 之前；否则更具体的路由会被泛化路由抢匹配。
+- **`Internal Server Error (HTTP 500)`** with a plain-text body: most likely a stale backend process, or a schema that still requires `str` for fields like `llm_model`. Ensure `apps/api/app/schemas/job.py` has `ProcessingInfo.llm_model: str | None = None`, then restart the backend.
+- **`Failed to fetch`**: the browser tried to hit the API directly. Keep `NEXT_PUBLIC_API_URL` unset so it only talks to same-origin `/api/v1`.
+- **`GET /{job_id}/result` → 404/405/empty**: make sure `@router.get("/{job_id}/result")` is defined *before* `@router.get("/{job_id}")` in FastAPI, otherwise the catch-all wins route matching.
 
-## 许可
+## License
 
-MIT。欢迎 PR。
+MIT. PRs welcome.
