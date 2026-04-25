@@ -1,0 +1,393 @@
+BiliBookLLM — Product Requirements Document (PRD)
+1. Product Vision
+BiliBookLLM is a lightweight, privacy-aware NotebookLLM for Bilibili video content. Users paste a Bilibili URL and receive structured, exportable notes — full transcript, chapter summaries, key takeaways, keywords, and optional Q&A — generated via an LLM-powered pipeline with a subtitle-first, local-ASR-fallback strategy.
+
+2. Target Users
+Persona	Need
+Students	Distill lecture/tutorial videos into study notes
+Researchers	Extract key points from long-form talks
+Content curators	Quickly index and catalog video libraries
+Language learners	Access bilingual transcripts for Chinese-language video
+3. User Stories (MVP)
+ID	Story	Priority
+US-1	As a user, I can paste a Bilibili URL and see video metadata (title, thumbnail, duration) within 5 s.	P0
+US-2	As a user, I can see real-time progress as the system processes my video.	P0
+US-3	As a user, I can read the full timestamped transcript in a scrollable panel.	P0
+US-4	As a user, I can read an overall summary, chapter summaries, key takeaways, and keywords.	P0
+US-5	As a user, I can export results as Markdown, TXT, or JSON.	P0
+US-6	As a user, I can view Q&A generated from the transcript.	P1
+US-7	As a user, I can see which method was used (subtitle vs ASR) and confidence info.	P1
+US-8	As a user, I can reprocess a video with different LLM settings.	P2
+4. Functional Requirements
+4.1 URL Input & Validation
+Accept bilibili.com/video/BVxxxxx and b23.tv short links.
+Extract BVID via regex; reject non-Bilibili URLs with clear error message.
+Resolve short links to canonical BVID.
+4.2 Metadata Extraction
+Retrieve: title, author, thumbnail URL, duration, view count, publish date, description, page count (multi-part detection).
+Display metadata card before processing begins.
+4.3 Transcript Acquisition (Subtitle-First Pipeline)
+Subtitle path: Query Bilibili subtitle API for CC JSON → parse into timestamped segments.
+ASR fallback: Download audio via yt-dlp → convert to 16 kHz mono WAV via ffmpeg → transcribe with faster-whisper (VAD-enabled, int8 quantization).
+Record which path was used in the result metadata.
+4.4 Segmentation
+Chunk transcript into semantically coherent segments (~500–1000 tokens).
+If CC subtitles provide natural breaks (chapter markers), prefer those.
+Otherwise use recursive character splitting with 10 % overlap.
+4.5 LLM Summarization
+Map-Reduce strategy for long transcripts:
+Map: per-chunk summary.
+Reduce: merge into overall summary, chapter summaries, key takeaways, keywords, Q&A.
+Structured JSON output enforced via system prompt + output schema.
+Configurable LLM provider (OpenAI-compatible API endpoint + model name via env vars).
+4.6 Export
+Markdown (.md), plain text (.txt), JSON (.json).
+Markdown template with YAML front-matter (title, author, source URL, date).
+5. Non-Functional Requirements
+Category	Requirement
+Latency	Metadata display < 5 s; subtitle extraction < 10 s; ASR ≤ 1× real-time on GPU
+Scalability	Single-user MVP; architecture must support async job queue for multi-user later
+Privacy	ASR runs locally; no audio sent to external services unless user opts in
+Reliability	Graceful fallback: subtitle → ASR → error with clear message
+Observability	Structured logging (JSON) on backend; job status exposed via API
+Security	No Bilibili cookies stored in DB; env-var only. Rate-limit public endpoints
+6. Out of Scope (MVP)
+YouTube / other platform support
+User accounts & authentication
+Collaborative note editing
+Real-time streaming transcription
+Danmaku analysis
+Mobile-native app
+7. Success Metrics (Post-Launch)
+Metric	Target
+End-to-end processing time (10 min video, subtitle path)	< 30 s
+End-to-end processing time (10 min video, ASR path)	< 15 min (CPU) / < 3 min (GPU)
+Summary factual accuracy (manual spot-check)	> 85 %
+Export format correctness	100 % valid Markdown/JSON
+
+
+
+BiliBookLLM — System Architecture
+1. High-Level Architecture
+┌─────────────────────────────────────────────────────────────────┐
+│                        CLIENT (Browser)                         │
+│                     Next.js 15 App Router                       │
+│  ┌──────────┐  ┌──────────────┐  ┌───────────┐  ┌───────────┐  │
+│  │ URL Input│  │ Progress View│  │ Reader    │  │ Export    │  │
+│  │ Panel    │  │ (SSE/Poll)   │  │ Panel     │  │ Controls  │  │
+│  └──────────┘  └──────────────┘  └───────────┘  └───────────┘  │
+└────────────────────────┬────────────────────────────────────────┘
+                         │ HTTP / SSE
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     API GATEWAY (FastAPI)                        │
+│  ┌──────────┐  ┌──────────────┐  ┌───────────┐  ┌───────────┐  │
+│  │ /jobs    │  │ /jobs/{id}   │  │ /jobs/    │  │ /export/  │  │
+│  │ POST     │  │ GET (status) │  │ {id}/result│ │ {id}/{fmt}│  │
+│  └──────────┘  └──────────────┘  └───────────┘  └───────────┘  │
+│                         │                                       │
+│              ┌──────────▼──────────┐                            │
+│              │   Job Orchestrator  │                            │
+│              │   (async pipeline)  │                            │
+│              └──────────┬──────────┘                            │
+│       ┌─────────┬───────┼───────┬──────────┐                    │
+│       ▼         ▼       ▼       ▼          ▼                    │
+│  ┌────────┐┌────────┐┌──────┐┌──────┐┌─────────┐               │
+│  │Extract ││Transcr.││Chunk ││Summa-││ Export  │               │
+│  │Module  ││Module  ││Module││rize  ││ Module  │               │
+│  └────────┘└────────┘└──────┘└──────┘└─────────┘               │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+              ┌──────────▼──────────┐
+              │     SQLite (MVP)    │
+              │  jobs, results,     │
+              │  transcripts        │
+              └─────────────────────┘
+2. Component Responsibilities
+Component	Responsibility	Key Libraries
+Next.js Frontend	URL input, progress display, reader UI, export triggers	React 19, TanStack Query, lucide-react
+FastAPI Backend	REST API, job lifecycle, pipeline orchestration	FastAPI, Pydantic v2, SQLAlchemy 2.0
+Extractor Module	URL validation, metadata fetch, subtitle download	yt-dlp (Python API), bilibili-api-python
+Transcription Module	Audio download, conversion, ASR	yt-dlp, ffmpeg, faster-whisper
+Chunking Module	Segment transcript into semantically coherent chunks	Custom (recursive char split + overlap)
+Summarization Module	Map-reduce LLM summarization, structured output	openai SDK (OpenAI-compatible)
+Export Module	Render results to Markdown / TXT / JSON	Jinja2 templates
+Database	Job state, cached results, transcripts	SQLite + SQLAlchemy (swap to PostgreSQL later)
+3. Technology Choices
+Layer	Choice	Rationale
+Frontend framework	Next.js 15 (App Router)	SSR/SSG, file-based routing, React Server Components
+Backend framework	FastAPI	Async-native, auto OpenAPI, Pydantic validation
+ORM	SQLAlchemy 2.0 + Alembic	Async support, migration tooling, DB-agnostic
+Database (MVP)	SQLite	Zero-config, single-file, swap to PG via env var
+ASR engine	faster-whisper	CTranslate2 backend, 4× faster than vanilla Whisper, int8 support
+Video/audio tool	yt-dlp	Best Bilibili support, Python API, active maintenance
+Audio processing	ffmpeg	Industry standard, required by faster-whisper
+LLM client	openai Python SDK	Compatible with OpenAI, Deepseek, local Ollama, etc.
+Task queue (future)	Celery + Redis or arq	Async job processing for multi-user; MVP uses asyncio.create_task
+Package manager (Python)	uv	Fast, reliable, replaces pip + venv
+Package manager (JS)	pnpm	Fast, disk-efficient, workspace support
+4. Data Flow (Happy Path — Subtitle Available)
+SQLite
+Summarizer
+Extractor
+FastAPI
+Next.js
+User
+SQLite
+Summarizer
+Extractor
+FastAPI
+Next.js
+User
+Background pipeline starts
+Paste Bilibili URL
+POST /api/v1/jobs {url}
+Create job (status=pending)
+202 {job_id}
+extract_metadata(url)
+metadata + subtitle JSON
+Update job (status=transcribing)
+chunk_transcript(segments)
+Update job (status=summarizing)
+map_reduce_summarize(chunks)
+structured output
+Update job (status=completed, store result)
+GET /api/v1/jobs/{id} (polling)
+{status, progress, result}
+Display transcript + notes
+5. Data Flow (Fallback — ASR Required)
+SQLite
+Transcriber
+Extractor
+FastAPI
+SQLite
+Transcriber
+Extractor
+FastAPI
+ffmpeg → 16kHz WAV
+faster-whisper (VAD, int8)
+extract_metadata(url)
+metadata (no subtitles)
+Update (status=downloading_audio)
+download_audio(url)
+audio file path
+transcribe(audio_path)
+timestamped segments
+Update (status=summarizing)
+6. Project Directory Structure
+biliBookLLM/
+├── apps/
+│   ├── web/                          # Next.js frontend
+│   │   ├── app/
+│   │   │   ├── layout.tsx
+│   │   │   ├── page.tsx              # Landing / URL input
+│   │   │   ├── jobs/
+│   │   │   │   └── [id]/
+│   │   │   │       └── page.tsx      # Result reader
+│   │   │   └── globals.css
+│   │   ├── components/
+│   │   │   ├── url-input.tsx
+│   │   │   ├── video-card.tsx
+│   │   │   ├── progress-bar.tsx
+│   │   │   ├── transcript-panel.tsx
+│   │   │   ├── summary-panel.tsx
+│   │   │   └── export-controls.tsx
+│   │   ├── lib/
+│   │   │   ├── api-client.ts
+│   │   │   └── types.ts
+│   │   ├── package.json
+│   │   └── next.config.ts
+│   │
+│   └── api/                          # FastAPI backend
+│       ├── app/
+│       │   ├── main.py               # FastAPI app entry
+│       │   ├── config.py             # Settings via pydantic-settings
+│       │   ├── models/               # SQLAlchemy models
+│       │   │   ├── __init__.py
+│       │   │   └── job.py
+│       │   ├── schemas/              # Pydantic request/response
+│       │   │   ├── __init__.py
+│       │   │   └── job.py
+│       │   ├── routers/
+│       │   │   ├── __init__.py
+│       │   │   ├── jobs.py
+│       │   │   └── export.py
+│       │   ├── services/             # Business logic
+│       │   │   ├── __init__.py
+│       │   │   └── pipeline.py       # Orchestrator
+│       │   ├── modules/              # Pipeline modules
+│       │   │   ├── __init__.py
+│       │   │   ├── extractor.py      # URL validation + metadata + subtitle
+│       │   │   ├── transcriber.py    # Audio download + ASR
+│       │   │   ├── chunker.py        # Transcript segmentation
+│       │   │   ├── summarizer.py     # LLM map-reduce
+│       │   │   └── exporter.py       # MD / TXT / JSON rendering
+│       │   └── db/
+│       │       ├── __init__.py
+│       │       ├── engine.py         # Async engine setup
+│       │       └── migrations/       # Alembic
+│       ├── templates/                # Jinja2 export templates
+│       │   ├── export.md.j2
+│       │   └── export.txt.j2
+│       ├── tests/
+│       │   ├── test_extractor.py
+│       │   ├── test_transcriber.py
+│       │   ├── test_chunker.py
+│       │   ├── test_summarizer.py
+│       │   └── test_pipeline.py
+│       ├── pyproject.toml
+│       └── .env.example
+│
+├── docker-compose.yml
+├── .gitignore
+└── README.md
+7. Inter-Service Communication
+From → To	Protocol	Notes
+Frontend → Backend	HTTP REST + SSE (optional)	JSON payloads; SSE for real-time progress (stretch)
+Backend → Bilibili	HTTPS	Via yt-dlp / bilibili-api-python; rate-limited
+Backend → LLM API	HTTPS	OpenAI-compatible endpoint; configurable via env
+Backend → SQLite	Local file I/O	Async via aiosqlite
+Backend → ffmpeg	Subprocess	Audio conversion
+Backend → faster-whisper	In-process Python	Loaded on first ASR request, kept in memory
+8. Deployment Topology (MVP)
+Single Machine (dev laptop or small VPS)
+├── Next.js dev server (:3000)
+├── FastAPI (uvicorn) (:8000)
+├── SQLite file (./data/bilibookllm.db)
+├── ffmpeg (system PATH)
+└── faster-whisper model cache (~/.cache/huggingface/)
+For production, see the Deployment Recommendation document.
+
+
+BiliBookLLM — Implementation Plan (Milestones)
+Overview
+5 milestones, ~4–5 weeks for a solo developer. Each milestone ends with a testable deliverable.
+
+Milestone 1: Project Scaffold & Core Infrastructure (Days 1–3)
+Goals
+Repository structure, tooling, dev environment
+Database schema + migrations
+FastAPI skeleton with health check
+Next.js skeleton with URL input page
+Tasks
+#	Task	Est.
+1.1	Initialize git repo, .gitignore, README.md	0.5 h
+1.2	Set up apps/api/ — pyproject.toml with uv, FastAPI, SQLAlchemy, Alembic, Pydantic	1 h
+1.3	Create config.py with pydantic-settings (DB URL, LLM endpoint, Whisper model, etc.)	0.5 h
+1.4	Define SQLAlchemy models (Job, Transcript, Result)	1 h
+1.5	Set up Alembic, generate initial migration, verify SQLite creation	0.5 h
+1.6	Create FastAPI app entry (main.py) with CORS, lifespan, router mounts	0.5 h
+1.7	Implement GET /health and POST /api/v1/jobs stub (returns 202 with job_id)	0.5 h
+1.8	Set up apps/web/ — npx create-next-app@latest (App Router, TypeScript)	0.5 h
+1.9	Create URL input component with Bilibili URL validation (client-side regex)	1 h
+1.10	Create API client helper (lib/api-client.ts)	0.5 h
+1.11	Create docker-compose.yml for local dev (optional)	0.5 h
+1.12	Add .env.example files for both apps	0.5 h
+Deliverable
+POST /api/v1/jobs accepts a URL, creates a DB row, returns job_id
+Frontend can submit a URL and receive a job ID
+Database migrations run cleanly
+Milestone 2: Extraction Pipeline — Metadata & Subtitles (Days 4–8)
+Goals
+Bilibili URL validation (server-side, short link resolution)
+Metadata extraction via yt-dlp
+Subtitle extraction (CC JSON)
+Progress tracking via job status updates
+Tasks
+#	Task	Est.
+2.1	Implement extractor.py — URL validation with BVID regex + b23.tv redirect resolution	2 h
+2.2	Implement metadata extraction via yt-dlp.extract_info(download=False)	2 h
+2.3	Implement subtitle detection and download (yt-dlp --write-subs --skip-download)	3 h
+2.4	Parse subtitle JSON into unified TranscriptSegment schema (start, end, text)	1 h
+2.5	Implement pipeline.py orchestrator — runs extract → (subtitle or ASR) → chunk → summarize	2 h
+2.6	Wire pipeline into job creation endpoint as asyncio.create_task	1 h
+2.7	Implement GET /api/v1/jobs/{id} — returns job status, progress %, metadata	1 h
+2.8	Frontend: VideoCard component showing metadata after job creation	2 h
+2.9	Frontend: ProgressBar component polling job status	1.5 h
+2.10	Write unit tests for extractor (mock yt-dlp responses)	2 h
+2.11	Handle multi-part (multi-page) Bilibili videos — extract all CIDs	1.5 h
+2.12	Add Bilibili cookie support via env var for restricted content	1 h
+Deliverable
+Submit a Bilibili URL → see video title, thumbnail, duration
+If subtitles exist, they are downloaded and stored
+Job status updates visible in frontend
+Milestone 3: Transcription Fallback — Audio + ASR (Days 9–14)
+Goals
+Audio download via yt-dlp
+Audio conversion via ffmpeg
+Transcription via faster-whisper
+Unified transcript output regardless of source
+Tasks
+#	Task	Est.
+3.1	Implement transcriber.py — audio download (yt-dlp, best audio format)	2 h
+3.2	Implement ffmpeg conversion to 16 kHz mono WAV (subprocess wrapper)	1.5 h
+3.3	Implement faster-whisper integration (model loading, vad_filter=True, compute_type=int8)	3 h
+3.4	Implement segment output normalization (same schema as subtitle path)	1 h
+3.5	Add model size configuration via env var (WHISPER_MODEL=base, small, large-v3)	0.5 h
+3.6	Implement temp file cleanup after transcription	0.5 h
+3.7	Add transcription progress reporting (segment count / estimated total)	1.5 h
+3.8	Handle edge cases: empty audio, very short videos (< 30 s), very long videos (> 2 h)	2 h
+3.9	Implement source field in transcript (subtitle vs ASR + model used)	0.5 h
+3.10	Write unit tests for transcriber (mock audio files, test segment output)	2 h
+3.11	Integration test: end-to-end subtitle path + ASR path with sample videos	2 h
+Deliverable
+Videos without subtitles are transcribed locally via faster-whisper
+Transcript output is identical format regardless of source
+Frontend shows transcription source indicator
+Milestone 4: Summarization & Export (Days 15–22)
+Goals
+Transcript chunking
+LLM map-reduce summarization
+Structured output generation
+Multi-format export
+Tasks
+#	Task	Est.
+4.1	Implement chunker.py — recursive character splitter with token counting	2 h
+4.2	Add chapter-marker detection from Bilibili metadata (if available)	1.5 h
+4.3	Implement summarizer.py — LLM client wrapper (OpenAI-compatible)	2 h
+4.4	Design system prompts for: chunk summary, overall summary, key takeaways, keywords, Q&A	3 h
+4.5	Implement map phase — parallel chunk summarization with concurrency limit	2 h
+4.6	Implement reduce phase — merge chunk summaries into final structured output	2 h
+4.7	Define Pydantic output schema for structured result (JSON mode / function calling)	1 h
+4.8	Implement exporter.py — Jinja2 templates for Markdown and TXT	2 h
+4.9	Implement JSON export (direct Pydantic .model_dump_json())	0.5 h
+4.10	Implement GET /api/v1/jobs/{id}/result — full result payload	1 h
+4.11	Implement GET /api/v1/export/{id}/{format} — file download (md/txt/json)	1.5 h
+4.12	Frontend: TranscriptPanel — scrollable, timestamped, searchable	3 h
+4.13	Frontend: SummaryPanel — tabbed view (summary / chapters / takeaways / keywords / Q&A)	3 h
+4.14	Frontend: ExportControls — format selector + download buttons	1.5 h
+4.15	Write tests for chunker, summarizer (mock LLM responses), exporter	3 h
+Deliverable
+Full pipeline works end-to-end: URL → transcript → notes → export
+All export formats generate valid files
+Reader UI is functional and polished
+Milestone 5: Polish, Error Handling & Documentation (Days 23–28)
+Goals
+Error handling & edge cases
+UI polish & responsive design
+Caching / deduplication
+Documentation
+Tasks
+#	Task	Est.
+5.1	Implement job deduplication — cache by BVID, return existing result if available	2 h
+5.2	Add comprehensive error handling: network failures, Bilibili rate limiting, LLM errors	3 h
+5.3	Add retry logic with exponential backoff for LLM API calls	1 h
+5.4	Frontend error states — clear messages for each failure mode	2 h
+5.5	UI polish: dark mode, animations, responsive layout, loading skeletons	4 h
+5.6	Add robots.txt and proper SEO meta tags	0.5 h
+5.7	Add structured logging (JSON format) with structlog	1.5 h
+5.8	Write API documentation (auto-generated OpenAPI + manual guide)	1.5 h
+5.9	Write README.md with setup instructions, env var reference, architecture overview	2 h
+5.10	End-to-end manual QA with 10 diverse Bilibili videos	3 h
+5.11	Performance profiling — identify and fix bottlenecks	2 h
+5.12	Create .env.example with all configurable options documented	0.5 h
+Deliverable
+Production-ready MVP
+Comprehensive error handling
+Polished, responsive UI
+Full documentation
+Timeline Summary
+Week 1: M1 (scaffold) + M2 (extraction)
+Week 2: M2 (finish) + M3 (ASR)
+Week 3: M4 (summarization + export)
+Week 4: M4 (frontend) + M5 (polish)
