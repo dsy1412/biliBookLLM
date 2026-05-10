@@ -236,6 +236,20 @@ async def _fetch_official_subtitle_tracks(bvid: str, cid: int | None) -> list[di
     if cid is None:
         return tracks
 
+    player_wbi_payload = await _fetch_json(
+        "https://api.bilibili.com/x/player/wbi/v2",
+        params={"bvid": bvid, "cid": cid},
+    )
+    player_wbi_data = player_wbi_payload.get("data", {}) if isinstance(player_wbi_payload, dict) else {}
+    player_wbi_subtitles = ((player_wbi_data.get("subtitle") or {}).get("subtitles")) or []
+    for track in player_wbi_subtitles:
+        if not isinstance(track, dict):
+            continue
+        normalized = _normalize_track(track, "player_wbi_v2")
+        if normalized and normalized["subtitle_url"] not in seen_urls:
+            seen_urls.add(normalized["subtitle_url"])
+            tracks.append(normalized)
+
     player_payload = await _fetch_json(
         "https://api.bilibili.com/x/player/v2",
         params={"bvid": bvid, "cid": cid},

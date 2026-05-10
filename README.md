@@ -1,152 +1,184 @@
 # BiliBookLLM
 
-**English** · [简体中文](./README.zh.md)
+[简体中文](./README.zh.md)
 
-Turn Bilibili videos into structured notes — a single-machine full-stack project. A FastAPI backend handles subtitle extraction / Whisper transcription / LLM summarization; a Next.js frontend submits jobs, tracks progress, reads results, and exports to Markdown / TXT / JSON.
+BiliBookLLM is a local-first desktop-style tool for turning Bilibili videos into usable transcripts.
+
+The project keeps the current architecture:
+
+- `apps/web`: Next.js frontend
+- `apps/api`: FastAPI backend
+- `desktop/`: Electron launcher for one-click local use
+
+The main goal is simple: **prefer Bilibili's own subtitle tracks whenever possible, and only fall back to local ASR when subtitles are unavailable.**
 
 > Repo: <https://github.com/dsy1412/biliBookLLM.git>
 
-## Why I built this (Motivation)
+## What it does
 
-I maintain my personal knowledge base in **Obsidian**. Many Bilibili creators I follow produce long-form content (science, engineering, finance), and re-watching a 20-minute video just to refresh a memory is expensive. I want to **lift the content out of the video and into my vault as searchable, linkable Markdown**, so it can be connected with my other notes via backlinks.
+- Paste one or many Bilibili links
+- Detect whether the video already exposes official subtitles or AI subtitles
+- Fetch subtitle JSON directly when available
+- Fall back to local Whisper transcription only when needed
+- Track jobs in a local dashboard
+- Run as a local desktop app through Electron
 
-That led to two concrete requirements:
+## Subtitle-first logic
 
-1. **Subtitles first.** The top priority is to reliably obtain a transcript for any Bilibili URL I paste — preferring the creator's own CC, falling back to Whisper ASR when none exists. This is the single most valuable artifact for a knowledge base: it can be read, quoted, and cross-linked.
-2. **LLM summarization as a second pass.** With the transcript in hand, an LLM condenses it into chapters, key takeaways, keywords, and optional Q&A, all exported as a single Markdown file that drops cleanly into `Obsidian/Vault/Inbox/`.
+This project is intentionally biased toward **subtitle retrieval**, not audio downloading.
 
-**Roadmap toward a "hosted API" flavor.** The current app runs locally and calls a user-supplied LLM key. I'm planning a later variant that exposes a public REST API (and probably an Obsidian plugin / shortcut) so the whole pipeline can be triggered without a local install — paste a URL, get back a ready-to-import Markdown note. The internal contracts under `apps/api/app/routers/*` are already designed with that future in mind: stateless job IDs, JSON results, dedicated `/export` endpoint.
+Current priority:
 
-If you have a similar use case (Obsidian / Logseq / any plain-Markdown vault), this repo should be immediately useful.
+1. `x/web-interface/view?bvid=...`
+2. `x/player/wbi/v2?bvid=...&cid=...`
+3. `x/player/v2?bvid=...&cid=...`
+4. yt-dlp subtitle metadata fallback
+5. local audio download + Whisper ASR fallback
 
-## Architecture at a glance
+If a subtitle track exists, the backend downloads the subtitle JSON and builds transcript segments from that data directly.
 
-```text
-┌──────────────────────┐          ┌───────────────────────────────┐
-│  Next.js 16 (Web)    │  /api/v1 │  FastAPI (API, uvicorn)       │
-│  apps/web  :3000     ├─────────►│  apps/api  :8001 (default)    │
-│  Route Handler proxy │          │  yt-dlp / faster-whisper / LLM│
-└──────────────────────┘          └───────────────────────────────┘
-                                               │
-                                               ▼
-                                     SQLite (data/bilibookllm.db)
+This is better than always using ASR because it:
+
+- avoids unnecessary audio downloads
+- uses less disk space
+- is usually more accurate than local speech recognition
+- keeps startup and processing faster for videos that already have captions
+
+The relevant implementation lives in:
+
+- [apps/api/app/modules/extractor.py](G:\vibe_codeing\biliBookLLM\apps\api\app\modules\extractor.py)
+- [apps/api/app/services/pipeline.py](G:\vibe_codeing\biliBookLLM\apps\api\app\services\pipeline.py)
+
+## Local desktop usage
+
+This project is now meant to be used locally.
+
+### First-time setup
+
+Requirements:
+
+- Python 3.11+
+- Node.js 20+
+- `ffmpeg` in `PATH` if ASR fallback is needed
+
+Bootstrap once:
+
+```powershell
+cd G:\vibe_codeing\biliBookLLM
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-desktop.ps1
 ```
 
-The browser only talks to the same-origin `/api/v1/*`; `apps/web/src/app/api/v1/[[...path]]/route.ts` proxies to the backend (`BACKEND_URL`). This avoids CORS and `Failed to fetch`.
+This script:
 
-## Repository layout
+- creates `apps/api/.venv`
+- installs backend dependencies
+- installs frontend dependencies
+- installs Electron dependencies
+- builds the web app
 
-```text
-apps/
-  api/                 FastAPI service
-    app/
-      main.py          App entry + CORS + exception handlers
-      config.py        Pydantic settings (.env)
-      db/              SQLAlchemy engine & base
-      models/          Job / Transcript / SummaryResult
-      schemas/         Pydantic response models
-      routers/
-        jobs.py        /api/v1/jobs (including /result)
-        export.py      /api/v1/export/{job_id}/{format}
-      modules/
-        extractor.py   yt-dlp + BV-ID validation
-        transcriber.py faster-whisper
-        summarizer.py  chunked LLM summarization
-        exporter.py    Markdown / TXT / JSON export
-      services/pipeline.py   Job pipeline
-    scripts/dev_smoke.py     End-to-end smoke script (uses a fixed BV URL)
-    pyproject.toml
-  web/                 Next.js 16 (Turbopack) + React 19 + Tailwind 4
-    src/
-      app/
-        page.tsx                Home (submit a job)
-        jobs/[id]/page.tsx      Reader
-        api/v1/[[...path]]/route.ts   Same-origin proxy to FastAPI
-      lib/api-client.ts         Typed client
-      components/               UI components
-    package.json
+### Launch
+
+Double-click:
+
+- [launch-desktop.bat](G:\vibe_codeing\biliBookLLM\launch-desktop.bat)
+
+or run:
+
+```powershell
+cd G:\vibe_codeing\biliBookLLM
+npm run desktop
 ```
 
-## Quick start
+A desktop shortcut can be created with:
 
-### 1) Backend (Python ≥ 3.11)
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\create-desktop-shortcut.ps1
+```
 
-```bash
-cd apps/api
+That script creates:
+
+- `C:\Users\Dsy\Desktop\BiliBookLLM.lnk`
+
+## Development mode
+
+If you want to run the services manually instead of Electron:
+
+### Backend
+
+```powershell
+cd apps\api
 python -m venv .venv
-.venv\Scripts\activate        # macOS/Linux: source .venv/bin/activate
+.\.venv\Scripts\activate
 pip install -e .[dev]
-copy .env.example .env         # set LLM_API_KEY, etc.
 uvicorn app.main:app --host 127.0.0.1 --port 8001
 ```
 
-Important: the default port is **8001**. On Windows, `uvicorn --reload` can leak zombie listening sockets on 8000 when Ctrl-C'd hard, which then serves stale 500s (plain text `Internal Server Error`). 8001 avoids that. If you need 8000, verify it is truly free first (`netstat -ano | findstr :8000`).
-
-### 2) Frontend (Node ≥ 20)
-
-```bash
-cd apps/web
-npm install
-copy .env.example .env         # empty default is fine
-npm run dev                    # http://localhost:3000
-```
-
-`apps/web/.env`:
-
-```env
-# Leave NEXT_PUBLIC_API_URL unset → browser only hits same-origin /api/v1,
-# which route.ts proxies to BACKEND_URL below.
-BACKEND_URL=http://127.0.0.1:8001
-# NEXT_PUBLIC_API_URL=http://127.0.0.1:8001/api/v1
-```
-
-### 3) One-command smoke test (recommended)
-
-The repo ships an end-to-end smoke script that uses a fixed Bilibili URL (`BV1TRdbBeETz`):
-
-```bash
-cd apps/web
-npm run smoke:api
-```
-
-It will:
-
-1. Validate that `BV1TRdbBeETz` parses through `extractor.validate_and_extract_bvid`.
-2. Hit `API_BASE` (default `http://127.0.0.1:8001`) for `/health` and, if a completed job exists, `GET /api/v1/jobs/{id}/result`.
-3. Unless `SKIP_NEXT=1` is set, repeat the request through `NEXT_BASE` (default `http://127.0.0.1:3000`) to assert the Next proxy returns the same 200 body.
-
-Override via environment:
+### Frontend
 
 ```powershell
-$env:API_BASE="http://127.0.0.1:8001"
-$env:NEXT_BASE="http://127.0.0.1:3000"
-$env:SKIP_NEXT="1"    # only test the backend directly
+cd apps\web
+npm install
+npm run dev
+```
+
+Default local routing:
+
+- frontend: `http://localhost:3000`
+- backend: `http://127.0.0.1:8001`
+
+## Important local config
+
+Frontend proxy config:
+
+- [apps/web/src/app/api/v1/[[...path]]/route.ts](<G:\vibe_codeing\biliBookLLM\apps\web\src\app\api\v1\[[...path]]\route.ts>)
+
+Frontend example env:
+
+- [apps/web/.env.example](G:\vibe_codeing\biliBookLLM\apps\web\.env.example)
+
+Backend env:
+
+- [apps/api/.env](G:\vibe_codeing\biliBookLLM\apps\api\.env)
+
+For normal local use, keep:
+
+```env
+BACKEND_URL=http://127.0.0.1:8001
+```
+
+## Job dashboard behavior
+
+The desktop UI polls `/api/v1/jobs` periodically so the Recent Jobs panel stays fresh.
+
+If you see continuous API log output, that is usually because:
+
+- the dashboard is refreshing job state
+- backend `DEBUG=true` is printing SQL logs
+
+To reduce log noise, change this in [apps/api/.env](G:\vibe_codeing\biliBookLLM\apps\api\.env):
+
+```env
+DEBUG=false
 ```
 
 ## Main endpoints
 
-| Path                                 | Method | Description                                                                   |
-| ------------------------------------ | ------ | ----------------------------------------------------------------------------- |
-| `/api/v1/jobs`                       | POST   | Submit a Bilibili URL, create a new job (202)                                 |
-| `/api/v1/jobs`                       | GET    | Paginated list, optional `status` filter                                      |
-| `/api/v1/jobs/{job_id}`              | GET    | Current status and progress                                                   |
-| `/api/v1/jobs/{job_id}/result`       | GET    | Full result of a completed job (UTF-8 JSON; `/result` must register before `/{job_id}`) |
-| `/api/v1/jobs/{job_id}`              | DELETE | Delete a job                                                                  |
-| `/api/v1/export/{job_id}/{format}`   | GET    | Export as `markdown` / `txt` / `json`                                         |
-| `/health`                            | GET    | Health check                                                                  |
+| Path | Method | Purpose |
+| --- | --- | --- |
+| `/api/v1/jobs` | `POST` | Submit one Bilibili video |
+| `/api/v1/jobs/batch` | `POST` | Submit multiple Bilibili videos |
+| `/api/v1/jobs` | `GET` | List recent jobs |
+| `/api/v1/jobs/{job_id}` | `GET` | Get job status |
+| `/api/v1/jobs/{job_id}/result` | `GET` | Get completed transcript result |
+| `/api/v1/jobs/{job_id}` | `DELETE` | Delete a job |
+| `/api/v1/export/{job_id}/{format}` | `GET` | Export transcript/result |
+| `/health` | `GET` | Health check |
 
-## Proxy implementation notes (`apps/web/.../route.ts`)
+## Notes
 
-- Force `Accept-Encoding: identity` when calling the backend, to prevent Node's undici from transparently decompressing the body while still forwarding the upstream `Content-Encoding: gzip` / wrong `Content-Length` to the browser.
-- Buffer the response, strip `content-encoding` / `content-length` / `transfer-encoding`, and rewrite `content-length` from the buffered bytes.
-- End-to-end timeout is 120s; failures respond with 502 JSON (`detail.error.code / message`), which `api-client.ts`'s `throwIfNotOk` renders into readable messages.
-
-## Troubleshooting
-
-- **`Internal Server Error (HTTP 500)`** with a plain-text body: most likely a stale backend process, or a schema that still requires `str` for fields like `llm_model`. Ensure `apps/api/app/schemas/job.py` has `ProcessingInfo.llm_model: str | None = None`, then restart the backend.
-- **`Failed to fetch`**: the browser tried to hit the API directly. Keep `NEXT_PUBLIC_API_URL` unset so it only talks to same-origin `/api/v1`.
-- **`GET /{job_id}/result` → 404/405/empty**: make sure `@router.get("/{job_id}/result")` is defined *before* `@router.get("/{job_id}")` in FastAPI, otherwise the catch-all wins route matching.
+- This repo still contains summary-related code paths from earlier iterations, but the current local workflow is centered on transcript retrieval first.
+- If Bilibili changes subtitle response formats or access rules, the official subtitle probes may need maintenance.
 
 ## License
 
-MIT. PRs welcome.
+MIT.

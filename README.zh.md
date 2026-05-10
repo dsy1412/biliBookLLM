@@ -1,151 +1,197 @@
 # BiliBookLLM
 
-[English](./README.md) · **简体中文**
+[English](./README.md)
 
-把 B 站视频变成结构化笔记的单机全栈项目：FastAPI 后端负责抓取字幕 / Whisper 转写 / LLM 摘要，Next.js 前端负责提交任务、查看进度与阅读结果，支持导出 Markdown / TXT / JSON。
+BiliBookLLM 是一个 **本地优先** 的 B 站视频转录工具。  
+它的重点不是把网站上线，而是让你在自己电脑上方便、稳定地拿到视频字幕。
+
+当前结构保持不变：
+
+- `apps/web`：Next.js 前端
+- `apps/api`：FastAPI 后端
+- `desktop/`：Electron 桌面启动器
+
+这个项目现在的核心原则是：
+
+**能直接拿 B 站官方字幕 / AI 字幕，就不要先下载音频做本地 ASR。**
 
 > 仓库：<https://github.com/dsy1412/biliBookLLM.git>
 
-## 写这个的动机
+## 现在主要能做什么
 
-我用 **Obsidian** 维护个人知识库。我关注的一些 B 站 UP 主产出的是长内容（科普、工程、金融），每次想回忆某个点又要把 20 分钟视频重看一遍，成本太高。我的核心诉求是：**把视频里的内容"搬"进 Obsidian，变成可检索、可双链的 Markdown**，让它与我的其他笔记融合。
+- 粘贴一个或多个 B 站链接
+- 优先探测视频是否已经有官方字幕或 AI 字幕
+- 如果有字幕，直接拉取字幕 JSON
+- 如果没有字幕，再回退到本地 Whisper ASR
+- 在本地任务面板里查看处理状态
+- 通过 Electron 当作桌面软件使用
 
-这就引出两个具体目标：
+## 字幕获取逻辑
 
-1. **优先拿到字幕文件。** 任何一条 B 站链接粘进来，我都希望稳定拿到一份转写：优先使用 UP 主自带的 CC 字幕；没有的话用 Whisper 做 ASR 兜底。对知识库而言，字幕本身就是最值钱的产物——可读、可引用、可被其他笔记反向链接。
-2. **LLM 摘要作为第二段加工。** 拿到字幕后交给 LLM，产出章节、要点、关键词和可选的问答对，最后打包成单个 Markdown 文件，能直接丢进 `Obsidian/Vault/Inbox/`。
+这个项目现在明确是 **字幕优先**，不是“先下载音频再识别”。
 
-**后续规划：做一个"API 版本"。** 目前是单机运行、用户自己填 LLM Key。之后会出一个对外暴露公共 REST API（大概率还带一个 Obsidian 插件或快捷方式）的版本——粘贴 URL、直接返回可入库的 Markdown，不需要本地安装 Python 环境。`apps/api/app/routers/*` 里已经按这个目标设计了接口：无状态 job id、JSON 结果、独立的 `/export` 端点。
+当前优先级：
 
-如果你的使用场景类似（Obsidian / Logseq / 任何纯 Markdown 知识库），这个仓库应当立刻可用。
+1. `x/web-interface/view?bvid=...`
+2. `x/player/wbi/v2?bvid=...&cid=...`
+3. `x/player/v2?bvid=...&cid=...`
+4. yt-dlp 自带的字幕元数据兜底
+5. 本地下载音频 + Whisper ASR
 
-## 架构一览
+也就是说，只要视频已经暴露出字幕轨道，就会优先直接拿字幕 JSON，再转换成 transcript segments。
 
-```text
-┌──────────────────────┐          ┌───────────────────────────────┐
-│  Next.js 16 (Web)    │  /api/v1 │  FastAPI (API, uvicorn)       │
-│  apps/web  :3000     ├─────────►│  apps/api  :8001 (默认)       │
-│  Route Handler 反代  │          │  yt-dlp / faster-whisper / LLM│
-└──────────────────────┘          └───────────────────────────────┘
-                                               │
-                                               ▼
-                                     SQLite (data/bilibookllm.db)
+这样做的好处：
+
+- 不必每次都下载音频
+- 更省磁盘空间
+- 官方字幕 / AI 字幕通常比本地识别更准
+- 对已有字幕的视频，速度更快
+
+相关实现文件：
+
+- [apps/api/app/modules/extractor.py](G:\vibe_codeing\biliBookLLM\apps\api\app\modules\extractor.py)
+- [apps/api/app/services/pipeline.py](G:\vibe_codeing\biliBookLLM\apps\api\app\services\pipeline.py)
+
+## 本地桌面使用
+
+这个项目现在推荐按“本地软件”方式使用。
+
+### 首次准备
+
+需要先有：
+
+- Python 3.11+
+- Node.js 20+
+- 如果要走 ASR 兜底，`ffmpeg` 最好在 `PATH` 里
+
+首次执行一次：
+
+```powershell
+cd G:\vibe_codeing\biliBookLLM
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-desktop.ps1
 ```
 
-前端在浏览器只请求同域 `/api/v1/*`，由 `apps/web/src/app/api/v1/[[...path]]/route.ts` 反代到后端（`BACKEND_URL`），避免 CORS / `Failed to fetch`。
+这个脚本会：
 
-## 目录结构
+- 创建 `apps/api/.venv`
+- 安装后端依赖
+- 安装前端依赖
+- 安装 Electron 依赖
+- 构建前端
 
-```text
-apps/
-  api/                 FastAPI 服务
-    app/
-      main.py          应用入口 + CORS + 异常处理
-      config.py        Pydantic settings (.env)
-      db/              SQLAlchemy 引擎 & 基类
-      models/          Job / Transcript / SummaryResult
-      schemas/         Pydantic 响应模型
-      routers/
-        jobs.py        /api/v1/jobs （含 /result）
-        export.py      /api/v1/export/{job_id}/{format}
-      modules/
-        extractor.py   yt-dlp + BV 号校验
-        transcriber.py faster-whisper
-        summarizer.py  LLM 分块摘要
-        exporter.py    Markdown / TXT / JSON 导出
-      services/pipeline.py   任务流水线
-    scripts/dev_smoke.py     端到端冒烟脚本（含固定 BV 链接）
-    pyproject.toml
-  web/                 Next.js 16 (Turbopack) + React 19 + Tailwind 4
-    src/
-      app/
-        page.tsx                首页（提交任务）
-        jobs/[id]/page.tsx      阅读页
-        api/v1/[[...path]]/route.ts   同域反代到 FastAPI
-      lib/api-client.ts         前端封装
-      components/               UI 组件
-    package.json
+### 启动方式
+
+以后直接双击：
+
+- [launch-desktop.bat](G:\vibe_codeing\biliBookLLM\launch-desktop.bat)
+
+或者命令行启动：
+
+```powershell
+cd G:\vibe_codeing\biliBookLLM
+npm run desktop
 ```
 
-## 快速开始
+### 桌面快捷方式
 
-### 1) 后端（Python ≥ 3.11）
+可以运行：
 
-```bash
-cd apps/api
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\create-desktop-shortcut.ps1
+```
+
+会在桌面生成：
+
+- `C:\Users\Dsy\Desktop\BiliBookLLM.lnk`
+
+## 手动开发模式
+
+如果你暂时不想走 Electron，也可以手动开前后端。
+
+### 后端
+
+```powershell
+cd apps\api
 python -m venv .venv
-.venv\Scripts\activate        # macOS/Linux: source .venv/bin/activate
+.\.venv\Scripts\activate
 pip install -e .[dev]
-copy .env.example .env         # 填 LLM_API_KEY 等
 uvicorn app.main:app --host 127.0.0.1 --port 8001
 ```
 
-重要：默认端口是 **8001**。Windows 上 `uvicorn --reload` 有概率在被硬杀时留下僵尸监听 socket，占住 8000，前端会收到 `Internal Server Error (HTTP 500)` 的纯文本（旧代码）。切到 8001 是最稳妥的规避方式；如果你要换回 8000，先确认端口真正空闲（`netstat -ano | findstr :8000`）。
-
-### 2) 前端（Node ≥ 20）
-
-```bash
-cd apps/web
-npm install
-copy .env.example .env         # 默认空即可
-npm run dev                    # http://localhost:3000
-```
-
-`apps/web/.env`：
-
-```env
-# 不设置 NEXT_PUBLIC_API_URL → 浏览器只走同域 /api/v1，由 route.ts 反代到 BACKEND_URL
-BACKEND_URL=http://127.0.0.1:8001
-# NEXT_PUBLIC_API_URL=http://127.0.0.1:8001/api/v1
-```
-
-### 3) 一键冒烟测试（推荐）
-
-项目内置了用固定 B 站链接 `https://www.bilibili.com/video/BV1TRdbBeETz/...` 做端到端验证的脚本：
-
-```bash
-cd apps/web
-npm run smoke:api
-```
-
-该脚本会：
-
-1. 校验 `BV1TRdbBeETz` 能被 `extractor.validate_and_extract_bvid` 正确解析。
-2. 用 `API_BASE`（默认 `http://127.0.0.1:8001`）调 `/health`，以及 `GET /api/v1/jobs/{id}/result`。
-3. 若未设 `SKIP_NEXT=1`，再经 `NEXT_BASE`（默认 `http://127.0.0.1:3000`）的 Next 反代请求同一接口，断言 200。
-
-环境变量可通过 shell 覆盖：
+### 前端
 
 ```powershell
-$env:API_BASE="http://127.0.0.1:8001"
-$env:NEXT_BASE="http://127.0.0.1:3000"
-$env:SKIP_NEXT="1"    # 仅想测直连后端
+cd apps\web
+npm install
+npm run dev
 ```
+
+默认本地地址：
+
+- 前端：`http://localhost:3000`
+- 后端：`http://127.0.0.1:8001`
+
+## 关键本地配置
+
+前端代理逻辑：
+
+- [apps/web/src/app/api/v1/[[...path]]/route.ts](<G:\vibe_codeing\biliBookLLM\apps\web\src\app\api\v1\[[...path]]\route.ts>)
+
+前端示例环境变量：
+
+- [apps/web/.env.example](G:\vibe_codeing\biliBookLLM\apps\web\.env.example)
+
+后端环境变量：
+
+- [apps/api/.env](G:\vibe_codeing\biliBookLLM\apps\api\.env)
+
+本地默认应保持：
+
+```env
+BACKEND_URL=http://127.0.0.1:8001
+```
+
+## 为什么日志一直刷
+
+桌面版首页会定期轮询 `/api/v1/jobs`，让 Recent Jobs 面板自动刷新。
+
+如果你看到后端日志持续输出，一般是因为：
+
+- 前端正在刷新任务列表
+- 后端 `DEBUG=true`，SQLAlchemy 会把查询打印出来
+
+如果想安静一点，把 [apps/api/.env](G:\vibe_codeing\biliBookLLM\apps\api\.env) 里的：
+
+```env
+DEBUG=true
+```
+
+改成：
+
+```env
+DEBUG=false
+```
+
+然后重启桌面程序。
 
 ## 主要接口
 
-| 路径                                | 方法   | 说明                                                                       |
-| ----------------------------------- | ------ | -------------------------------------------------------------------------- |
-| `/api/v1/jobs`                      | POST   | 提交 B 站 URL，创建新 job（202）                                           |
-| `/api/v1/jobs`                      | GET    | 分页列出 jobs，可按 `status` 过滤                                          |
-| `/api/v1/jobs/{job_id}`             | GET    | 当前状态与进度                                                             |
-| `/api/v1/jobs/{job_id}/result`      | GET    | 已完成任务的完整结果（UTF-8 JSON；`/result` 必须先于 `/{job_id}` 注册）     |
-| `/api/v1/jobs/{job_id}`             | DELETE | 删除任务                                                                   |
-| `/api/v1/export/{job_id}/{format}`  | GET    | 导出 `markdown` / `txt` / `json`                                           |
-| `/health`                           | GET    | 健康检查                                                                   |
+| 路径 | 方法 | 用途 |
+| --- | --- | --- |
+| `/api/v1/jobs` | `POST` | 提交单个视频 |
+| `/api/v1/jobs/batch` | `POST` | 批量提交多个视频 |
+| `/api/v1/jobs` | `GET` | 查看最近任务 |
+| `/api/v1/jobs/{job_id}` | `GET` | 查看任务状态 |
+| `/api/v1/jobs/{job_id}/result` | `GET` | 获取已完成转录结果 |
+| `/api/v1/jobs/{job_id}` | `DELETE` | 删除任务 |
+| `/api/v1/export/{job_id}/{format}` | `GET` | 导出结果 |
+| `/health` | `GET` | 健康检查 |
 
-## 反代注意事项（`apps/web/.../route.ts`）
+## 说明
 
-- 向后端请求时强制 `Accept-Encoding: identity`，避免 Node 的 undici 自动解压却仍把 `Content-Encoding: gzip`、错误的 `Content-Length` 转发给浏览器。
-- 响应缓冲后再返回，并删除 `content-encoding` / `content-length` / `transfer-encoding`，重写 `content-length`。
-- 整条链路超时 120s，失败返回 502 JSON（含 `detail.error.code / message`），`api-client.ts` 的 `throwIfNotOk` 能据此显示人类可读的错误文案。
+- 仓库里仍然保留了一些早期 summary 相关代码，但当前真实使用路径是“先拿字幕，再决定是否需要 ASR”。
+- 如果未来 B 站修改字幕接口返回结构或访问限制，这部分探测逻辑可能需要维护。
 
-## 排查常见问题
+## License
 
-- **`Internal Server Error (HTTP 500)`** 且响应体是纯文本：大概率是旧代码进程没被杀，或 schema 对 `llm_model` 之类字段还要求 `str`。确认 `apps/api/app/schemas/job.py` 里 `ProcessingInfo.llm_model: str | None = None`，重启后端即可。
-- **`Failed to fetch`**：浏览器直连了 API。保持 `NEXT_PUBLIC_API_URL` 为空，让浏览器只走同域 `/api/v1`。
-- **`GET /{job_id}/result` 返回 404/405/空**：确保 FastAPI 中 `@router.get("/{job_id}/result")` 定义在 `@router.get("/{job_id}")` 之前；否则更具体的路由会被泛化路由抢匹配。
-
-## 许可
-
-MIT。欢迎 PR。
+MIT

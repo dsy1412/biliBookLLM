@@ -1,12 +1,15 @@
 {
   "name": "bilibookllm",
   "private": true,
-  "workspaces": [
-    "apps/web"
-  ],
+  "main": "desktop/main.cjs",
   "scripts": {
     "build:web": "npm --prefix apps/web run build",
     "dev:web": "npm --prefix apps/web run dev",
-    "lint:web": "npm --prefix apps/web run lint"
+    "lint:web": "npm --prefix apps/web run lint",
+    "desktop": "electron .",
+    "bootstrap:desktop": "powershell -ExecutionPolicy Bypass -File .\\scripts\\bootstrap-desktop.ps1"
+  },
+  "devDependencies": {
+    "electron": "^37.2.6"
   }
 }
