@@ -1,4 +1,4 @@
-"""Jobs router — CRUD and pipeline trigger for processing jobs."""
+"""Jobs router: CRUD and pipeline trigger for processing jobs."""
 
 from __future__ import annotations
 
@@ -11,12 +11,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db import get_db, AsyncSessionLocal
-from app.models import Job, Transcript, TranscriptSegment, SummaryResult
-from app.modules.extractor import validate_and_extract_bvid, ExtractionError
+from app.db import AsyncSessionLocal, get_db
+from app.models import Job, Transcript
+from app.modules.extractor import ExtractionError, validate_and_extract_bvid
 from app.schemas.job import (
     ChapterOut,
     ErrorDetail,
+    JobCreateBatchItem,
+    JobCreateBatchRequest,
+    JobCreateBatchResponse,
     JobCreateRequest,
     JobCreateResponse,
     JobListItem,
@@ -37,12 +40,42 @@ router = APIRouter(prefix="/api/v1/jobs", tags=["jobs"])
 
 
 async def _run_pipeline_in_background(job_id: str):
-    """Run the pipeline with its own database session (for background tasks)."""
+    """Run the pipeline with its own database session."""
     async with AsyncSessionLocal() as session:
         await run_pipeline(job_id, session)
 
 
-# ── Create Job ──────────────────────────────────────────────────
+async def _create_or_reuse_job(url: str, options, db: AsyncSession) -> tuple[Job, bool]:
+    """Create a new job or reuse an existing one for the same BVID."""
+    bvid = validate_and_extract_bvid(url)
+
+    if bvid == "__SHORT_LINK__":
+        bvid = f"PENDING_{hash(url) % 10**8:08d}"
+
+    existing = await db.execute(select(Job).where(Job.bvid == bvid))
+    existing_job = existing.scalar_one_or_none()
+
+    if existing_job:
+        if existing_job.status != "failed":
+            return existing_job, True
+        await db.delete(existing_job)
+        await db.commit()
+
+    job = Job(
+        bvid=bvid,
+        url=url,
+        force_asr=options.force_asr,
+        whisper_model=options.whisper_model,
+        generate_qa=options.generate_qa,
+        llm_model=options.llm_model,
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    logger.info("job_created", job_id=job.id, bvid=bvid, url=url)
+    asyncio.create_task(_run_pipeline_in_background(job.id))
+    return job, False
 
 
 @router.post("", response_model=JobCreateResponse, status_code=202)
@@ -50,85 +83,58 @@ async def create_job(
     request: JobCreateRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Submit a Bilibili video URL for processing.
-
-    Creates a new job and starts the processing pipeline in the background.
-    Returns immediately with a job_id for status polling.
-    """
-    # Validate URL
+    """Submit a Bilibili video URL for processing."""
     try:
-        bvid = validate_and_extract_bvid(request.url)
-    except ExtractionError as e:
+        job, reused_existing = await _create_or_reuse_job(request.url, request.options, db)
+    except ExtractionError as exc:
         raise HTTPException(
             status_code=400,
-            detail={"error": {"code": e.code, "message": e.message}},
+            detail={"error": {"code": exc.code, "message": exc.message}},
         )
-
-    # Handle short links — use a placeholder BVID, will be resolved in pipeline
-    if bvid == "__SHORT_LINK__":
-        bvid = f"PENDING_{hash(request.url) % 10**8:08d}"
-
-    # Check for duplicate BVID
-    existing = await db.execute(select(Job).where(Job.bvid == bvid))
-    existing_job = existing.scalar_one_or_none()
-
-    if existing_job:
-        if existing_job.status == "completed":
-            # Return existing completed job
-            return JobCreateResponse(
-                job_id=existing_job.id,
-                status=existing_job.status,
-                created_at=existing_job.created_at.isoformat(),
-                url=existing_job.url,
-            )
-        elif existing_job.status == "failed":
-            # Re-process failed jobs — delete old one
-            await db.delete(existing_job)
-            await db.commit()
-        else:
-            # Job is still processing
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": {
-                        "code": "JOB_DUPLICATE",
-                        "message": f"Job for {bvid} is already being processed",
-                        "details": {"job_id": existing_job.id},
-                    }
-                },
-            )
-
-    # Create new job
-    job = Job(
-        bvid=bvid,
-        url=request.url,
-        force_asr=request.options.force_asr,
-        whisper_model=request.options.whisper_model,
-        generate_qa=request.options.generate_qa,
-        llm_model=request.options.llm_model,
-    )
-    db.add(job)
-    await db.commit()
-    await db.refresh(job)
-
-    logger.info("job_created", job_id=job.id, bvid=bvid, url=request.url)
-
-    # Start pipeline in background
-    asyncio.create_task(_run_pipeline_in_background(job.id))
 
     return JobCreateResponse(
         job_id=job.id,
         status=job.status,
         created_at=job.created_at.isoformat(),
         url=job.url,
+        reused_existing=reused_existing,
     )
 
 
-# ── Get Job Result (路由必须在 GET /{job_id} 之前，避免与含斜杠的 path 参数匹配冲突) ──
+@router.post("/batch", response_model=JobCreateBatchResponse, status_code=202)
+async def create_jobs_batch(
+    request: JobCreateBatchRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Submit multiple Bilibili URLs in one request."""
+    items: list[JobCreateBatchItem] = []
+
+    for url in request.urls:
+        try:
+            job, reused_existing = await _create_or_reuse_job(url, request.options, db)
+            items.append(
+                JobCreateBatchItem(
+                    url=url,
+                    job_id=job.id,
+                    status=job.status,
+                    created_at=job.created_at.isoformat(),
+                    reused_existing=reused_existing,
+                )
+            )
+        except ExtractionError as exc:
+            items.append(
+                JobCreateBatchItem(
+                    url=url,
+                    status="invalid",
+                    error=ErrorDetail(code=exc.code, message=exc.message),
+                )
+            )
+
+    return JobCreateBatchResponse(items=items)
 
 
 async def build_job_result_model(job_id: str, db: AsyncSession) -> JobResultResponse:
-    """Build `JobResultResponse` (shared by the HTTP route and export)."""
+    """Build JobResultResponse for the HTTP route and export endpoints."""
     result = await db.execute(
         select(Job)
         .options(
@@ -271,7 +277,7 @@ async def get_job_result(
     job_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """Get the full result of a completed job. Single JSON string from Pydantic (avoids Starlette/JSON double path issues)."""
+    """Get the full result of a completed job."""
     try:
         out = await build_job_result_model(job_id, db)
         return Response(
@@ -280,22 +286,19 @@ async def get_job_result(
         )
     except HTTPException:
         raise
-    except Exception as e:
-        logger.exception("get_job_result_failed", job_id=job_id, error=str(e))
+    except Exception as exc:
+        logger.exception("get_job_result_failed", job_id=job_id, error=str(exc))
         return JSONResponse(
             status_code=500,
             content={
                 "detail": {
                     "error": {
                         "code": "RESULT_BUILD_ERROR",
-                        "message": str(e)[:2000],
+                        "message": str(exc)[:2000],
                     }
                 }
             },
         )
-
-
-# ── Get Job Status ──────────────────────────────────────────────
 
 
 @router.get("/{job_id}", response_model=JobStatusResponse)
@@ -341,9 +344,6 @@ async def get_job_status(
     )
 
 
-# ── List Jobs ───────────────────────────────────────────────────
-
-
 @router.get("", response_model=JobListResponse)
 async def list_jobs(
     limit: int = Query(20, ge=1, le=100),
@@ -359,11 +359,9 @@ async def list_jobs(
         query = query.where(Job.status == status)
         count_query = count_query.where(Job.status == status)
 
-    # Get total count
     total_result = await db.execute(count_query)
     total = total_result.scalar() or 0
 
-    # Get paginated results
     query = query.order_by(Job.created_at.desc()).offset(offset).limit(limit)
     result = await db.execute(query)
     jobs = result.scalars().all()
@@ -375,16 +373,20 @@ async def list_jobs(
                 job_id=j.id,
                 status=j.status,
                 bvid=j.bvid,
+                url=j.url,
                 title=j.title,
                 created_at=j.created_at.isoformat(),
+                updated_at=j.updated_at.isoformat(),
+                progress=int(j.progress or 0),
+                stage=j.stage,
                 transcript_source=j.transcript_source,
+                error=ErrorDetail(code=j.error_code, message=j.error_message or "")
+                if j.error_code
+                else None,
             )
             for j in jobs
         ],
     )
-
-
-# ── Delete Job ──────────────────────────────────────────────────
 
 
 @router.delete("/{job_id}", status_code=204)

@@ -1,4 +1,5 @@
 import { Clock, Eye, Calendar, Layers } from "lucide-react";
+import SourceBadge from "@/components/source-badge";
 
 interface VideoMetadata {
   title: string;
@@ -11,7 +12,13 @@ interface VideoMetadata {
   page_count: number;
 }
 
-export default function VideoCard({ metadata }: { metadata: VideoMetadata }) {
+export default function VideoCard({
+  metadata,
+  source,
+}: {
+  metadata: VideoMetadata;
+  source?: string | null;
+}) {
   const formatDuration = (seconds: number) => {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
@@ -65,6 +72,12 @@ export default function VideoCard({ metadata }: { metadata: VideoMetadata }) {
         <p className="text-zinc-600 dark:text-zinc-400 font-medium mb-4">
           UP: {metadata.author}
         </p>
+
+        {source && (
+          <div className="mb-4">
+            <SourceBadge source={source} />
+          </div>
+        )}
 
         <div className="flex flex-wrap gap-4 text-sm text-zinc-500 dark:text-zinc-500">
           <div className="flex items-center gap-1.5">

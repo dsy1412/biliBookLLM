@@ -1,0 +1,12 @@
+{
+  "name": "bilibookllm",
+  "private": true,
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "build:web": "npm --prefix apps/web run build",
+    "dev:web": "npm --prefix apps/web run dev",
+    "lint:web": "npm --prefix apps/web run lint"
+  }
+}

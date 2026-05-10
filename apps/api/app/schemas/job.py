@@ -20,6 +20,11 @@ class JobCreateRequest(BaseModel):
     options: JobOptions = Field(default_factory=JobOptions)
 
 
+class JobCreateBatchRequest(BaseModel):
+    urls: list[str] = Field(..., min_length=1, max_length=50, description="Bilibili video URLs")
+    options: JobOptions = Field(default_factory=JobOptions)
+
+
 # ── Response Schemas ────────────────────────────────────────────
 
 
@@ -45,6 +50,20 @@ class JobCreateResponse(BaseModel):
     status: str
     created_at: str
     url: str
+    reused_existing: bool = False
+
+
+class JobCreateBatchItem(BaseModel):
+    url: str
+    job_id: str | None = None
+    status: str
+    created_at: str | None = None
+    reused_existing: bool = False
+    error: ErrorDetail | None = None
+
+
+class JobCreateBatchResponse(BaseModel):
+    items: list[JobCreateBatchItem]
 
 
 class JobStatusResponse(BaseModel):
@@ -114,9 +133,14 @@ class JobListItem(BaseModel):
     job_id: str
     status: str
     bvid: str
+    url: str
     title: str | None
     created_at: str
+    updated_at: str
+    progress: int
+    stage: str | None
     transcript_source: str | None
+    error: ErrorDetail | None = None
 
 
 class JobListResponse(BaseModel):

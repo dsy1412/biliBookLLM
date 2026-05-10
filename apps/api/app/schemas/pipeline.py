@@ -20,6 +20,10 @@ class ExtractResult(BaseModel):
     page_count: int
     subtitles: list[TranscriptSegmentOut] | None = None
     has_subtitles: bool = False
+    subtitle_source: str | None = None
+    subtitle_language: str | None = None
+    subtitle_track_count: int = 0
+    official_subtitle_available: bool = False
 
 
 class TranscribeResult(BaseModel):
